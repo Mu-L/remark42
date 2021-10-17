@@ -473,22 +473,25 @@ func (s *ServerCommand) newServerApp(ctx context.Context) (*serverApp, error) {
 	}
 
 	var emailNotifications bool
-	notifyService, telegramBotUsername, err := s.makeNotify(dataService, authenticator)
-
-	if contains("email", s.Notify.Users) {
-		emailNotifications = true
-	}
-
-	// we pass telegramBotUsername to Rest server only if user notifications are enabled
-	if !contains("telegram", s.Notify.Users) {
-		telegramBotUsername = ""
-	}
+	var telegramBotUsername string
+	notifyService, telegramService, err := s.makeNotify(dataService, authenticator)
 
 	if err != nil {
 		log.Printf("[WARN] failed to make notify service, %s", err)
 		notifyService = notify.NopService // disable notifier
-		emailNotifications = false        // email notifications are not available in this case
-		telegramBotUsername = ""          // telegram notifications are not available in this case either
+	} else {
+		if contains("telegram", s.Notify.Users) {
+			telegramBotUsername = telegramService.GetBotUsername()
+			go telegramService.Run(ctx)
+		} else {
+			// we pass telegramService to Rest server only if user notifications are enabled,
+			// and nullify it in case only admin notifications are present
+			telegramService = nil
+		}
+
+		if contains("email", s.Notify.Users) {
+			emailNotifications = true
+		}
 	}
 
 	imgProxy := &proxy.Image{
@@ -523,6 +526,7 @@ func (s *ServerCommand) newServerApp(ctx context.Context) (*serverApp, error) {
 		Authenticator:       authenticator,
 		Cache:               loadingCache,
 		NotifyService:       notifyService,
+		TelegramService:     telegramService,
 		SSLConfig:           sslConfig,
 		UpdateLimiter:       s.UpdateLimit,
 		ImageService:        imageService,
@@ -912,11 +916,11 @@ func (s *ServerCommand) loadEmailTemplate() (string, error) {
 	return string(file), nil
 }
 
-// aside from notify.Service and error, returns telegram bot name which will be passed to the frontend
-func (s *ServerCommand) makeNotify(dataStore *service.DataStore, authenticator *auth.Service) (*notify.Service, string, error) {
+// aside from notify.Service and error, returns telegram service
+func (s *ServerCommand) makeNotify(dataStore *service.DataStore, authenticator *auth.Service) (*notify.Service, *notify.Telegram, error) {
+	var telegramService *notify.Telegram
 	notifyService := notify.NopService
 	var destinations []notify.Destination
-	var telegramBotUsername string
 
 	if contains("webhook", s.Notify.Admins) {
 		client := &http.Client{Timeout: 5 * time.Second}
@@ -932,7 +936,7 @@ func (s *ServerCommand) makeNotify(dataStore *service.DataStore, authenticator *
 		}
 		webhook, err := notify.NewWebhook(client, whParams)
 		if err != nil {
-			return nil, "", errors.Wrap(err, "failed to create webhook notification destination")
+			return nil, nil, errors.Wrap(err, "failed to create webhook notification destination")
 		}
 		destinations = append(destinations, webhook)
 	}
@@ -940,27 +944,29 @@ func (s *ServerCommand) makeNotify(dataStore *service.DataStore, authenticator *
 	if contains("slack", s.Notify.Admins) {
 		slack, err := notify.NewSlack(s.Notify.Slack.Token, s.Notify.Slack.Channel)
 		if err != nil {
-			return nil, "", errors.Wrap(err, "failed to create slack notification destination")
+			return nil, nil, errors.Wrap(err, "failed to create slack notification destination")
 		}
 		destinations = append(destinations, slack)
 	}
 
 	if contains("telegram", s.Notify.Users) || contains("telegram", s.Notify.Admins) {
 		if contains("telegram", s.Notify.Admins) && s.Notify.Telegram.Channel == "" {
-			return nil, "", errors.New("--notify.telegram.channel must be set for admin notifications to work")
+			return nil, nil, errors.New("--notify.telegram.channel must be set for admin notifications to work")
 		}
 		telegramParams := notify.TelegramParams{
 			AdminChannelID:    s.Notify.Telegram.Channel,
 			UserNotifications: contains("telegram", s.Notify.Users),
 			Token:             s.Telegram.Token,
 			Timeout:           s.Telegram.Timeout,
+			ErrorMsg:          "❌ Invalid notifications verification request. Please try clicking link again.",
+			SuccessMsg:        "✅ You have successfully verified your notifications!",
 		}
 		tg, err := notify.NewTelegram(telegramParams)
 		if err != nil {
-			return nil, "", errors.Wrap(err, "failed to create telegram notification destination")
+			return nil, nil, errors.Wrap(err, "failed to create telegram notification destination")
 		}
 		destinations = append(destinations, tg)
-		telegramBotUsername = tg.BotUsername
+		telegramService = tg
 	}
 
 	// with logic below admin notifications enable notifications for users on the backend even if they
@@ -1004,7 +1010,7 @@ func (s *ServerCommand) makeNotify(dataStore *service.DataStore, authenticator *
 		}
 		emailService, err := notify.NewEmail(emailParams, smtpParams)
 		if err != nil {
-			return nil, "", errors.Wrap(err, "failed to create email notification destination")
+			return nil, nil, errors.Wrap(err, "failed to create email notification destination")
 		}
 		destinations = append(destinations, emailService)
 	}
@@ -1013,7 +1019,7 @@ func (s *ServerCommand) makeNotify(dataStore *service.DataStore, authenticator *
 		log.Printf("[INFO] make notify, for users: %s, for admins: %s", s.Notify.Users, s.Notify.Admins)
 		notifyService = notify.NewService(dataStore, s.Notify.QueueSize, destinations...)
 	}
-	return notifyService, telegramBotUsername, nil
+	return notifyService, telegramService, nil
 }
 
 func (s *ServerCommand) makeSSLConfig() (config api.SSLConfig, err error) {

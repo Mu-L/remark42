@@ -158,28 +158,8 @@ func TestTelegram_SendVerification(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, tb)
 
-	// proper VerificationRequest without telegram
-	req := VerificationRequest{
-		SiteID: "remark",
-		User:   "test_username",
-		Token:  "secret_",
-	}
-	assert.NoError(t, tb.SendVerification(context.TODO(), req))
-
-	// proper VerificationRequest with telegram
-	req.Telegram = "test"
-	assert.NoError(t, tb.SendVerification(context.TODO(), req))
-
-	// VerificationRequest with canceled context
-	ctx, cancel := context.WithCancel(context.TODO())
-	cancel()
-	assert.EqualError(t, tb.SendVerification(ctx, req), "sending message to \"test_username\" aborted due to canceled context")
-
-	// test buildVerificationMessage separately for message text
-	res, err := tb.buildVerificationMessage(req.User, req.Token, req.SiteID)
-	assert.NoError(t, err)
-	assert.Contains(t, string(res), `Confirmation for \u003ci\u003etest_username\u003c/i\u003e on site remark`)
-	assert.Contains(t, string(res), `secret_`)
+	// empty VerificationRequest should return no error and no nothing, as well as any other
+	assert.NoError(t, tb.SendVerification(context.TODO(), VerificationRequest{}))
 }
 
 func mockTelegramServer() *httptest.Server {
